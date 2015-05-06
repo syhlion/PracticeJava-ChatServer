@@ -88,6 +88,7 @@ public class NioChatServer implements Runnable{
             key.cancel();
             socketChannel.close();
             boradCast("userlists:" + getOnlineUser());
+            System.out.println("userlists: " + getOnlineUser());
             return;
         }
 
@@ -96,7 +97,8 @@ public class NioChatServer implements Runnable{
             userList.remove(getUser(socketChannel));
             key.cancel();
             socketChannel.close();
-            boradCast("userlists:"+getOnlineUser());
+            boradCast("userlists:" + getOnlineUser());
+            System.out.println("userlists: " + getOnlineUser());
             return;
         }
 
@@ -117,12 +119,14 @@ public class NioChatServer implements Runnable{
                 if(channel == null) {
                     userList.put(data[1], socketChannel);
 
-                    boradCast("userlists:"+getOnlineUser());
-                    System.out.println("login: "+data[1]);
+                    boradCast("userlists:" + getOnlineUser());
+                    System.out.println("login: " + data[1]);
+                    System.out.println("userlists: "+ getOnlineUser());
+
                 } else {
-                    String m = "duplicate_"+data[1];
+                    String m = "duplicate:"+data[1];
                     channel.write(ByteBuffer.wrap(m.getBytes()));
-                    System.out.println("duplicate_:" + data[1]);
+                    System.out.println("duplicate:" + data[1]);
                 }
 
                 break;

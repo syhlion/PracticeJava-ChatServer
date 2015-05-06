@@ -2,8 +2,8 @@ apply plugin: 'java'
 apply plugin: 'application'
 
 mainClassName = 'com.syhlion.Main'
-sourceCompatibility = 1.5
-version = '1.0'
+sourceCompatibility = 1.8
+version = '1.1'
 
 repositories {
     mavenCentral()
@@ -11,4 +11,12 @@ repositories {
 
 dependencies {
     testCompile group: 'junit', name: 'junit', version: '4.11'
+}
+sourceSets {
+    main {
+        java {
+            srcDir 'src'
+        }
+
+    }
 }
