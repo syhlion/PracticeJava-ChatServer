@@ -1,4 +1,4 @@
-# Created by .ignore support plugin (hsz.mobi)
+
 ### Java template
 *.class
 
@@ -14,12 +14,11 @@
 hs_err_pid*
 
 
-### Example user template template
-### Example user template
-
 # IntelliJ project files
 .idea
 *.iml
 out
 gen
+build
+.gradle
 
