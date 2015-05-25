@@ -8,7 +8,6 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
-import java.nio.charset.Charset;
 import java.util.*;
 
 /**
@@ -76,8 +75,8 @@ public class NioChatServer implements Runnable{
     }
 
     private void read(SelectionKey key) throws IOException{
-        SocketChannel socketChannel = ((SocketChannel) key.channel());
 
+        SocketChannel socketChannel = ((SocketChannel) key.channel());
 
         int numRead;
         try {
@@ -125,7 +124,7 @@ public class NioChatServer implements Runnable{
 
                 } else {
                     String m = "duplicate:"+data[1];
-                    channel.write(ByteBuffer.wrap(m.getBytes()));
+                    socketChannel.write(ByteBuffer.wrap(m.getBytes()));
                     System.out.println("duplicate:" + data[1]);
                 }
 
