@@ -1,6 +1,7 @@
 package com.syhlion;
 
 import java.io.IOException;
+import java.net.Inet4Address;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
@@ -8,6 +9,7 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.nio.channels.spi.SelectorProvider;
 import java.util.*;
 
 /**
@@ -15,171 +17,181 @@ import java.util.*;
  */
 public class NioChatServer implements Runnable{
 
+    //主要selector
     private Selector selector;
+    //主要的slectkey
     private SelectionKey serverKey;
+    private Inet4Address hostAddress;
+    private int port;
+    private ServerSocketChannel serverSocketChannel;
     private ByteBuffer readBuffer;
     private ByteBuffer writeBuffer;
-    private Vector<SocketChannel> channels;
+    private EchoWorker worker;
+
+    private List<SocketChannel> channels;
     private HashMap<String, SocketChannel> userList;
 
-    public NioChatServer(int port) {
-        try {
-            selector = Selector.open();
-            ServerSocketChannel serverSocketChannel = ServerSocketChannel.open();
-            serverSocketChannel.bind(new InetSocketAddress(port));
-            serverSocketChannel.configureBlocking(false);
-            serverKey = serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
-            readBuffer = ByteBuffer.allocate(8192);
-            userList = new HashMap<String, SocketChannel>();
-        } catch (IOException e) {
-            e.printStackTrace();
+
+    private List pendingChanges = new LinkedList();
+    private Map pendingData = new HashMap();
+
+    public NioChatServer(Inet4Address hostAddress, int port, EchoWorker worker) throws IOException{
+        this.hostAddress = hostAddress;
+        this.port = port;
+        this.selector = this.initSelector();
+        this.worker = worker;
+
+    }
+
+
+    public void send(SocketChannel socket, byte[] data) {
+        synchronized (this.pendingChanges) {
+            // Indicate we want the interest ops set changed
+            this.pendingChanges.add(new ChangeRequest(socket, ChangeRequest.CHANGEOPS, SelectionKey.OP_WRITE));
+
+            // And queue the data we want written
+            synchronized (this.pendingData) {
+                List queue = (List) this.pendingData.get(socket);
+                if (queue == null) {
+                    queue = new ArrayList();
+                    this.pendingData.put(socket, queue);
+                }
+                queue.add(ByteBuffer.wrap(data));
+            }
         }
 
-
+        // Finally, wake up our selecting thread so it can make the required changes
+        this.selector.wakeup();
     }
 
     @Override
     public void run() {
-        try {
-            while (true) {
-                int n = selector.select();
-                if ( n == 0) {
-                    continue;
-                }
-                Iterator<SelectionKey> select =  selector.selectedKeys().iterator();
-                while(select.hasNext()) {
-                    SelectionKey clientKey = select.next();
-                    select.remove();
-                    if(clientKey.isAcceptable()) {
-                        this.accept(clientKey);
+        while (true) {
+            try {
+                // Process any pending changes
+                synchronized (this.pendingChanges) {
+                    Iterator changes = this.pendingChanges.iterator();
+                    while (changes.hasNext()) {
+                        ChangeRequest change = (ChangeRequest) changes.next();
+                        switch (change.type) {
+                            case ChangeRequest.CHANGEOPS:
+                                SelectionKey key = change.socket.keyFor(this.selector);
+                                key.interestOps(change.ops);
+                        }
                     }
-                    if(clientKey.isReadable()) {
-                        this.read(clientKey);
+                    this.pendingChanges.clear();
+                }
+
+                // Wait for an event one of the registered channels
+                this.selector.select();
+
+                // Iterate over the set of keys for which events are available
+                Iterator selectedKeys = this.selector.selectedKeys().iterator();
+                while (selectedKeys.hasNext()) {
+                    SelectionKey key = (SelectionKey) selectedKeys.next();
+                    selectedKeys.remove();
+
+                    if (!key.isValid()) {
+                        continue;
+                    }
+
+                    // Check what event is available and deal with it
+                    if (key.isAcceptable()) {
+                        this.accept(key);
+                    } else if (key.isReadable()) {
+                        this.read(key);
+                    } else if (key.isWritable()) {
+                        this.write(key);
                     }
                 }
+            } catch (Exception e) {
+                e.printStackTrace();
             }
-        } catch (IOException e) {
-            e.printStackTrace();
         }
     }
 
+    private Selector initSelector() throws IOException {
+        Selector socketSelector = Selector.open();
+        this.serverSocketChannel = ServerSocketChannel.open();
+        serverSocketChannel.configureBlocking(false);
+        InetSocketAddress isa = new InetSocketAddress(this.hostAddress, this.port);
+        serverSocketChannel.bind(isa);
+        serverSocketChannel.register(socketSelector, SelectionKey.OP_ACCEPT);
+
+        return socketSelector;
+    }
+
     private void accept(SelectionKey key) throws IOException{
-        ServerSocketChannel serverSocketChannel = (ServerSocketChannel)key.channel();
+
+        // For an accept to be pending the channel must be a server socket channel.
+        ServerSocketChannel serverSocketChannel = (ServerSocketChannel) key.channel();
+
+        // Accept the connection and make it non-blocking
         SocketChannel socketChannel = serverSocketChannel.accept();
         Socket socket = socketChannel.socket();
         socketChannel.configureBlocking(false);
 
+        // Register the new SocketChannel with our Selector, indicating
+        // we'd like to be notified when there's data waiting to be read
         socketChannel.register(this.selector, SelectionKey.OP_READ);
-        System.out.println("登入 : " + socket.getInetAddress());
 
     }
 
     private void read(SelectionKey key) throws IOException{
 
-        SocketChannel socketChannel = ((SocketChannel) key.channel());
+        SocketChannel socketChannel = (SocketChannel) key.channel();
 
+        // Clear out our read buffer so it's ready for new data
+        this.readBuffer.clear();
+
+        // Attempt to read off the channel
         int numRead;
         try {
             numRead = socketChannel.read(this.readBuffer);
         } catch (IOException e) {
-            System.out.println(getUser(socketChannel) + " Disconnect");
-            userList.remove(getUser(socketChannel));
+            // The remote forcibly closed the connection, cancel
+            // the selection key and close the channel.
             key.cancel();
             socketChannel.close();
-            boradCast("userlists:" + getOnlineUser());
-            System.out.println("userlists: " + getOnlineUser());
             return;
         }
 
         if (numRead == -1) {
-            System.out.println(getUser(socketChannel)+"Disconnect");
-            userList.remove(getUser(socketChannel));
+            // Remote entity shut the socket down cleanly. Do the
+            // same from our end and cancel the channel.
+            key.channel().close();
             key.cancel();
-            socketChannel.close();
-            boradCast("userlists:" + getOnlineUser());
-            System.out.println("userlists: " + getOnlineUser());
             return;
         }
 
-        this.readBuffer.flip();
-        int limit = this.readBuffer.limit();
-        int step = 0;
-        byte[] buffer = new byte[limit];
-        while (this.readBuffer.hasRemaining()) {
-            buffer[step] = this.readBuffer.get();
-            step++;
-        }
-        this.readBuffer.clear();
-        String text = new String(buffer);
-        String[] data = text.split(":");
-        switch (data[0]) {
-            case "login" :
-                SocketChannel channel = userList.get(data[1]);
-                if(channel == null) {
-                    userList.put(data[1], socketChannel);
-
-                    boradCast("userlists:" + getOnlineUser());
-                    System.out.println("login: " + data[1]);
-                    System.out.println("userlists: "+ getOnlineUser());
-
-                } else {
-                    String m = "duplicate:"+data[1];
-                    socketChannel.write(ByteBuffer.wrap(m.getBytes()));
-                    System.out.println("duplicate:" + data[1]);
-                }
-
-                break;
-            case "message" :
-                if(data.length != 3) break;
-                SocketChannel toChannel = userList.get(data[1]);
-                if(toChannel == null) {
-                    String m = "errorTO:"+data[1];
-                    socketChannel.write(ByteBuffer.wrap(m.getBytes()));
-                    System.out.println("errorTO:" + data[1]);
-                } else {
-                    String m = "message:"+getUser(socketChannel)+":"+data[2];
-                    toChannel.write(ByteBuffer.wrap(m.getBytes()));
-                    System.out.println("message:" +getUser(socketChannel)+":"+data[2]);
-                }
-
-
-                break;
-        }
+        // Hand the data off to our worker thread
+        this.worker.processData(this, socketChannel, this.readBuffer.array(), numRead);
     }
 
-    private void boradCast(String msg) throws IOException{
-        for(Map.Entry<String, SocketChannel> entry : userList.entrySet()){
-            entry.getValue().write(ByteBuffer.wrap(msg.getBytes()));
-        }
+    private void write(SelectionKey key) throws IOException {
+        SocketChannel socketChannel = (SocketChannel) key.channel();
 
-    }
+        synchronized (this.pendingData) {
+            List queue = (List) this.pendingData.get(socketChannel);
 
-    private String getOnlineUser(){
-        StringBuffer sb = new StringBuffer();
-        List<String> tmp = new ArrayList<String>();
+            // Write until there's not more data ...
+            while (!queue.isEmpty()) {
+                ByteBuffer buf = (ByteBuffer) queue.get(0);
+                socketChannel.write(buf);
+                if (buf.remaining() > 0) {
+                    // ... or the socket's buffer fills up
+                    break;
+                }
+                queue.remove(0);
+            }
 
-        for(Map.Entry<String, SocketChannel> entry : userList.entrySet()){
-            tmp.add(entry.getKey());
-        }
-        if (!tmp.isEmpty()) {
-            sb.append(tmp.remove(0));
-            for(String s : tmp) {
-                sb.append(",");
-                sb.append(s);
+            if (queue.isEmpty()) {
+                // We wrote away all data, so we're no longer interested
+                // in writing on this socket. Switch back to waiting for
+                // data.
+                key.interestOps(SelectionKey.OP_READ);
             }
         }
-
-        return sb.toString();
     }
-    private  String getUser(SocketChannel socketChannel) {
-        String m = "";
-        for(Map.Entry<String, SocketChannel> entry : userList.entrySet()){
-            if(entry.getValue() == socketChannel) {
-                m = entry.getKey();
-            }
-        }
-        return m;
-    }
-
 
 }
